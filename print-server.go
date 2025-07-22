@@ -208,11 +208,11 @@ func printBarcode(req *PrintRequest) error {
 	
 	switch barcodeType {
 	case "CODE39":
-		// GS k m n d1...dn
-		// m=69 (0x45) 是 CODE39 的标准格式
-		data := []byte(req.BarcodeData)
-		printer.Write([]byte{0x1D, 0x6B, 0x45, byte(len(data))})
-		printer.Write(data)
+		// 使用简单格式 GS k m d1...dn (结束符为 NULL)
+		// m=4 是 CODE39
+		printer.Write([]byte{0x1D, 0x6B, 0x04})
+		printer.Write([]byte(req.BarcodeData))
+		printer.Write([]byte{0x00}) // NULL 结束符
 		
 	case "EAN13":
 		// 处理EAN-13，自动计算校验码
@@ -237,17 +237,11 @@ func printBarcode(req *PrintRequest) error {
 	case "CODE128":
 		fallthrough
 	default:
-		// GS k m n d1...dn
-		// m=73 (0x49) 是 CODE128 的格式
-		data := []byte(req.BarcodeData)
-		// CODE128 需要包含起始码、数据和校验码
-		// 使用 CODE B 模式（可以编码所有ASCII字符）
-		fullData := make([]byte, 0, len(data)+2)
-		fullData = append(fullData, 0x7B, 0x42) // {B 表示 CODE128 B型
-		fullData = append(fullData, data...)
-		
-		printer.Write([]byte{0x1D, 0x6B, 0x49, byte(len(fullData))})
-		printer.Write(fullData)
+		// 使用简单格式 GS k m d1...dn (结束符为 NULL)
+		// m=5 是 CODE128 的简单格式
+		printer.Write([]byte{0x1D, 0x6B, 0x05})
+		printer.Write([]byte(req.BarcodeData))
+		printer.Write([]byte{0x00}) // NULL 结束符
 	}
 
 	// 添加足够的换行确保条形码完整打印
@@ -478,6 +472,7 @@ const testHTML = `
             <input type="text" id="barcode-data" placeholder="输入条形码数据" value="1234567890">
             
             <div class="examples">
+                <button class="example-btn" onclick="setExample('uuid')">UUID示例</button>
                 <button class="example-btn" onclick="setExample('product')">商品编号</button>
                 <button class="example-btn" onclick="setExample('order')">订单号</button>
                 <button class="example-btn" onclick="setExample('ean13')">EAN-13示例</button>
@@ -530,8 +525,8 @@ const testHTML = `
         
         switch(type) {
             case 'CODE128':
-                info.textContent = 'CODE128：支持所有ASCII字符，包括字母、数字和符号';
-                dataInput.placeholder = '输入条形码数据';
+                info.textContent = 'CODE128：支持所有ASCII字符，包括字母、数字和符号（适合UUID、订单号等）';
+                dataInput.placeholder = '输入条形码数据（如UUID）';
                 break;
             case 'CODE39':
                 info.textContent = 'CODE39：支持大写字母、数字和部分符号（- . $ / + % 空格）';
@@ -548,12 +543,24 @@ const testHTML = `
         }
     }
 
+    // 生成UUID v4
+    function generateUUID() {
+        return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function(c) {
+            var r = Math.random() * 16 | 0, v = c == 'x' ? r : (r & 0x3 | 0x8);
+            return v.toString(16);
+        });
+    }
+
     // 设置示例
     function setExample(type) {
         const dataInput = document.getElementById('barcode-data');
         const typeSelect = document.getElementById('barcode-type');
         
         switch(type) {
+            case 'uuid':
+                typeSelect.value = 'CODE128';
+                dataInput.value = generateUUID();
+                break;
             case 'product':
                 typeSelect.value = 'CODE128';
                 dataInput.value = 'PROD-2024-001';
