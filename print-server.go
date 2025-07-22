@@ -138,6 +138,29 @@ func printHandler(w http.ResponseWriter, r *http.Request) {
 	sendSuccess(w, "打印成功")
 }
 
+// 计算EAN-13校验码
+func calculateEAN13CheckDigit(code string) string {
+	if len(code) == 13 {
+		code = code[:12] // 如果是13位，取前12位重新计算
+	}
+	if len(code) != 12 {
+		return code // 长度不对，返回原值
+	}
+	
+	sum := 0
+	for i := 0; i < 12; i++ {
+		digit := int(code[i] - '0')
+		if i%2 == 0 {
+			sum += digit
+		} else {
+			sum += digit * 3
+		}
+	}
+	
+	checkDigit := (10 - (sum % 10)) % 10
+	return code + fmt.Sprintf("%d", checkDigit)
+}
+
 // 打印条形码
 func printBarcode(req *PrintRequest) error {
 	// 打开LPT1端口
@@ -154,10 +177,6 @@ func printBarcode(req *PrintRequest) error {
 	// 初始化打印机 (ESC @)
 	printer.Write([]byte("\x1B\x40"))
 
-	// 设置打印浓度（有助于条形码清晰）
-	// ESC 7 n (n=0-7, 数值越大越浓)
-	printer.Write([]byte{0x1B, 0x37, 0x07})
-
 	// 设置条形码高度
 	// GS h n
 	printer.Write([]byte{0x1D, 0x68, byte(req.BarcodeHeight)})
@@ -172,8 +191,6 @@ func printBarcode(req *PrintRequest) error {
 	// GS H n (0=不打印, 1=上方, 2=下方, 3=上下都打印)
 	if req.ShowText {
 		printer.Write([]byte{0x1D, 0x48, 0x02}) // 下方打印
-		// 设置字体
-		printer.Write([]byte{0x1D, 0x66, 0x00}) // 字体A
 	} else {
 		printer.Write([]byte{0x1D, 0x48, 0x00}) // 不打印
 	}
@@ -188,42 +205,49 @@ func printBarcode(req *PrintRequest) error {
 
 	// 选择条形码类型并打印
 	barcodeType := strings.ToUpper(req.BarcodeType)
-	data := []byte(req.BarcodeData)
 	
 	switch barcodeType {
 	case "CODE39":
-		// GS k 4 n d1...dn
-		printer.Write([]byte{0x1D, 0x6B, 0x04})
-		printer.Write([]byte{byte(len(data))})
+		// GS k m n d1...dn
+		// m=69 (0x45) 是 CODE39 的标准格式
+		data := []byte(req.BarcodeData)
+		printer.Write([]byte{0x1D, 0x6B, 0x45, byte(len(data))})
 		printer.Write(data)
 		
 	case "EAN13":
-		// GS k 67 13 d1...d13
-		if len(req.BarcodeData) == 13 {
-			printer.Write([]byte{0x1D, 0x6B, 0x43, 0x0D})
-			printer.Write(data)
-		} else {
-			return fmt.Errorf("EAN13条形码必须是13位数字")
+		// 处理EAN-13，自动计算校验码
+		ean13 := calculateEAN13CheckDigit(req.BarcodeData)
+		if len(ean13) != 13 {
+			return fmt.Errorf("EAN13条形码必须是12或13位数字")
 		}
+		// GS k m d1...d13
+		// m=2 是 EAN13 的格式
+		printer.Write([]byte{0x1D, 0x6B, 0x02})
+		printer.Write([]byte(ean13))
 		
 	case "EAN8":
-		// GS k 68 8 d1...d8
-		if len(req.BarcodeData) == 8 {
-			printer.Write([]byte{0x1D, 0x6B, 0x44, 0x08})
-			printer.Write(data)
-		} else {
+		// GS k m d1...d8
+		// m=3 是 EAN8 的格式
+		if len(req.BarcodeData) != 8 {
 			return fmt.Errorf("EAN8条形码必须是8位数字")
 		}
+		printer.Write([]byte{0x1D, 0x6B, 0x03})
+		printer.Write([]byte(req.BarcodeData))
 		
 	case "CODE128":
 		fallthrough
 	default:
-		// GS k 73 n d1...dn (CODE128)
-		// 需要添加CODE128的起始码
-		printer.Write([]byte{0x1D, 0x6B, 0x49})
-		printer.Write([]byte{byte(len(data) + 2)})
-		printer.Write([]byte{0x7B, 0x42}) // {B 表示 CODE128 B型
-		printer.Write(data)
+		// GS k m n d1...dn
+		// m=73 (0x49) 是 CODE128 的格式
+		data := []byte(req.BarcodeData)
+		// CODE128 需要包含起始码、数据和校验码
+		// 使用 CODE B 模式（可以编码所有ASCII字符）
+		fullData := make([]byte, 0, len(data)+2)
+		fullData = append(fullData, 0x7B, 0x42) // {B 表示 CODE128 B型
+		fullData = append(fullData, data...)
+		
+		printer.Write([]byte{0x1D, 0x6B, 0x49, byte(len(fullData))})
+		printer.Write(fullData)
 	}
 
 	// 添加足够的换行确保条形码完整打印
@@ -514,8 +538,8 @@ const testHTML = `
                 dataInput.placeholder = '输入大写字母和数字';
                 break;
             case 'EAN13':
-                info.textContent = 'EAN-13：必须是13位数字（通常用于商品条码）';
-                dataInput.placeholder = '输入13位数字';
+                info.textContent = 'EAN-13：输入12位数字（自动计算第13位校验码）或完整13位';
+                dataInput.placeholder = '输入12或13位数字';
                 break;
             case 'EAN8':
                 info.textContent = 'EAN-8：必须是8位数字（用于小型商品）';
@@ -540,7 +564,7 @@ const testHTML = `
                 break;
             case 'ean13':
                 typeSelect.value = 'EAN13';
-                dataInput.value = '6901234567890';
+                dataInput.value = '690123456789';  // 12位，自动计算校验码
                 break;
         }
         updateBarcodeInfo();
@@ -562,8 +586,8 @@ const testHTML = `
         }
 
         // 验证条形码数据
-        if (barcodeType === 'EAN13' && barcodeData.length !== 13) {
-            showStatus('EAN-13条形码必须是13位数字', 'error');
+        if (barcodeType === 'EAN13' && barcodeData.length !== 12 && barcodeData.length !== 13) {
+            showStatus('EAN-13条形码必须是12或13位数字', 'error');
             return;
         }
         if (barcodeType === 'EAN8' && barcodeData.length !== 8) {
