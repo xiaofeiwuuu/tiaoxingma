@@ -207,6 +207,13 @@ func printBarcode(req *PrintRequest) error {
 	barcodeType := strings.ToUpper(req.BarcodeType)
 	
 	switch barcodeType {
+	case "CODE128A":
+		// 使用备选的 CODE128 格式
+		// m=5 自动选择子集
+		printer.Write([]byte{0x1D, 0x6B, 0x05})
+		printer.Write([]byte(req.BarcodeData))
+		printer.Write([]byte{0x00}) // NULL 结束符
+		
 	case "CODE39":
 		// 使用简单格式 GS k m d1...dn (结束符为 NULL)
 		// m=4 是 CODE39
@@ -237,11 +244,18 @@ func printBarcode(req *PrintRequest) error {
 	case "CODE128":
 		fallthrough
 	default:
-		// 使用简单格式 GS k m d1...dn (结束符为 NULL)
-		// m=5 是 CODE128 的简单格式
-		printer.Write([]byte{0x1D, 0x6B, 0x05})
-		printer.Write([]byte(req.BarcodeData))
-		printer.Write([]byte{0x00}) // NULL 结束符
+		// 使用扩展格式确保使用 CODE128-B 子集
+		// GS k m n d1...dn
+		// m=73 (0x49) 是 CODE128 的扩展格式
+		data := []byte(req.BarcodeData)
+		
+		// 创建完整的数据包，包含子集选择
+		fullData := make([]byte, 0, len(data)+2)
+		fullData = append(fullData, 0x7B, 0x42) // {B 表示使用 CODE128-B 子集（支持大小写字母）
+		fullData = append(fullData, data...)
+		
+		printer.Write([]byte{0x1D, 0x6B, 0x49, byte(len(fullData))})
+		printer.Write(fullData)
 	}
 
 	// 添加足够的换行确保条形码完整打印
@@ -457,7 +471,8 @@ const testHTML = `
             <div class="control-group">
                 <label>条形码类型：</label>
                 <select id="barcode-type" onchange="updateBarcodeInfo()">
-                    <option value="CODE128">CODE128（推荐）</option>
+                    <option value="CODE128">CODE128（推荐，支持UUID）</option>
+                    <option value="CODE128A">CODE128 格式2（备选）</option>
                     <option value="CODE39">CODE39</option>
                     <option value="EAN13">EAN-13（商品条码）</option>
                     <option value="EAN8">EAN-8（短条码）</option>
@@ -525,8 +540,12 @@ const testHTML = `
         
         switch(type) {
             case 'CODE128':
-                info.textContent = 'CODE128：支持所有ASCII字符，包括字母、数字和符号（适合UUID、订单号等）';
+                info.textContent = 'CODE128：支持所有ASCII字符，使用CODE128-B子集（支持大小写字母）';
                 dataInput.placeholder = '输入条形码数据（如UUID）';
+                break;
+            case 'CODE128A':
+                info.textContent = 'CODE128 格式2：备选格式，如果主格式无法正确扫描可尝试此选项';
+                dataInput.placeholder = '输入条形码数据';
                 break;
             case 'CODE39':
                 info.textContent = 'CODE39：支持大写字母、数字和部分符号（- . $ / + % 空格）';
