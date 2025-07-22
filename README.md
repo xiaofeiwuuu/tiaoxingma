@@ -7,7 +7,9 @@
 - ✅ 支持 LPT 并行端口打印机
 - ✅ 提供 HTTP API 接口
 - ✅ 支持 ESC/POS 指令集
-- ✅ 内置测试页面
+- ✅ **支持条形码打印**（CODE128、CODE39、EAN-13、EAN-8）
+- ✅ **自动转换中文编码**（UTF-8 转 GBK）
+- ✅ 内置测试页面（文本和条形码）
 - ✅ 支持跨域访问（CORS）
 - ✅ 单文件可执行程序，无需安装
 
@@ -48,15 +50,30 @@ API接口: http://localhost:9100/api/print
 #### 打印接口
 - **URL**: `POST http://localhost:9100/api/print`
 - **Content-Type**: `application/json`
-- **请求示例**:
 
+**文本打印请求示例**:
 ```json
 {
+  "type": "text",         // 打印类型
   "content": "要打印的内容",
-  "cut": true,      // 是否切纸
-  "bold": false,    // 是否加粗
-  "center": false,  // 是否居中
-  "fontSize": 3     // 字体大小 (1-5)
+  "cut": true,            // 是否切纸
+  "bold": false,          // 是否加粗
+  "center": false,        // 是否居中
+  "fontSize": 3           // 字体大小 (1-5)
+}
+```
+
+**条形码打印请求示例**:
+```json
+{
+  "type": "barcode",          // 打印类型
+  "barcodeType": "CODE128",   // 条形码类型：CODE128, CODE39, EAN13, EAN8
+  "barcodeData": "1234567890",// 条形码数据
+  "showText": true,           // 是否显示条形码文字
+  "center": true,             // 是否居中
+  "cut": true,                // 是否切纸
+  "barcodeWidth": 3,          // 条形码宽度 (2-6)
+  "barcodeHeight": 100        // 条形码高度 (1-255)
 }
 ```
 
@@ -76,22 +93,53 @@ API接口: http://localhost:9100/api/print
 ```json
 {
   "status": "running",
-  "version": "1.0.0",
-  "port": "LPT1"
+  "version": "2.0.0",
+  "port": "LPT1",
+  "features": ["text", "barcode", "gbk-encoding"]
 }
 ```
 
 ### 3. 网页调用示例
 
 ```javascript
-// JavaScript 调用示例
-async function printReceipt() {
+// 打印文本示例
+async function printText() {
     const printData = {
+        type: "text",
         content: "订单号：2024001\n商品：可乐\n价格：5元",
         cut: true,
         bold: false,
         center: true,
         fontSize: 3
+    };
+
+    try {
+        const response = await fetch('http://localhost:9100/api/print', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify(printData)
+        });
+
+        const result = await response.json();
+        console.log(result.message);
+    } catch (error) {
+        console.error('打印失败:', error);
+    }
+}
+
+// 打印条形码示例
+async function printBarcode() {
+    const printData = {
+        type: "barcode",
+        barcodeType: "CODE128",
+        barcodeData: "1234567890",
+        showText: true,
+        center: true,
+        cut: true,
+        barcodeWidth: 3,
+        barcodeHeight: 100
     };
 
     try {

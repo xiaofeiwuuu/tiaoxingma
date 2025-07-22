@@ -10,15 +10,24 @@ import (
 	"os/exec"
 	"runtime"
 	"strings"
+
+	"golang.org/x/text/encoding/simplifiedchinese"
+	"golang.org/x/text/transform"
 )
 
 // PrintRequest 打印请求结构
 type PrintRequest struct {
-	Content  string `json:"content"`  // 打印内容
-	Cut      bool   `json:"cut"`      // 是否切纸
-	Bold     bool   `json:"bold"`     // 是否加粗
-	Center   bool   `json:"center"`   // 是否居中
-	FontSize int    `json:"fontSize"` // 字体大小 (1-8)
+	Content      string `json:"content"`      // 打印内容
+	Type         string `json:"type"`         // 打印类型：text 或 barcode
+	BarcodeType  string `json:"barcodeType"`  // 条形码类型：CODE128, CODE39, EAN13 等
+	BarcodeData  string `json:"barcodeData"`  // 条形码数据
+	ShowText     bool   `json:"showText"`     // 是否显示条形码文字
+	Cut          bool   `json:"cut"`          // 是否切纸
+	Bold         bool   `json:"bold"`         // 是否加粗
+	Center       bool   `json:"center"`       // 是否居中
+	FontSize     int    `json:"fontSize"`     // 字体大小 (1-8)
+	BarcodeWidth int    `json:"barcodeWidth"` // 条形码宽度 (2-6)
+	BarcodeHeight int   `json:"barcodeHeight"`// 条形码高度 (1-255)
 }
 
 // PrintResponse 打印响应结构
@@ -56,6 +65,16 @@ func main() {
 	log.Fatal(http.ListenAndServe(port, nil))
 }
 
+// 将UTF-8转换为GBK
+func utf8ToGBK(s string) ([]byte, error) {
+	reader := transform.NewReader(strings.NewReader(s), simplifiedchinese.GBK.NewEncoder())
+	d, err := ioutil.ReadAll(reader)
+	if err != nil {
+		return nil, err
+	}
+	return d, nil
+}
+
 // 主页处理器
 func homeHandler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
@@ -69,6 +88,7 @@ func homeHandler(w http.ResponseWriter, r *http.Request) {
 	<body style="font-family: Arial; text-align: center; margin-top: 50px;">
 		<h1>热敏打印机服务运行中</h1>
 		<p>访问 <a href="/test">测试页面</a> 进行打印测试</p>
+		<p>支持文本和条形码打印</p>
 		<p>API文档：POST /api/print</p>
 	</body>
 	</html>
@@ -83,8 +103,9 @@ func statusHandler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"status": "running",
-		"version": "1.0.0",
+		"version": "2.0.0",
 		"port": "LPT1",
+		"features": []string{"text", "barcode", "gbk-encoding"},
 	})
 }
 
@@ -114,6 +135,17 @@ func printHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// 设置默认值
+	if req.Type == "" {
+		req.Type = "text"
+	}
+	if req.BarcodeWidth == 0 {
+		req.BarcodeWidth = 3
+	}
+	if req.BarcodeHeight == 0 {
+		req.BarcodeHeight = 100
+	}
+
 	// 执行打印
 	if err := printToLPT(&req); err != nil {
 		sendError(w, err.Error())
@@ -140,6 +172,30 @@ func printToLPT(req *PrintRequest) error {
 	// 初始化打印机 (ESC @)
 	printer.Write([]byte("\x1B\x40"))
 
+	// 根据类型打印
+	if req.Type == "barcode" && req.BarcodeData != "" {
+		// 打印条形码
+		if err := printBarcode(printer, req); err != nil {
+			return err
+		}
+	} else {
+		// 打印文本
+		if err := printText(printer, req); err != nil {
+			return err
+		}
+	}
+
+	// 切纸
+	if req.Cut {
+		// GS V m (切纸)
+		printer.Write([]byte("\x1D\x56\x41\x03"))
+	}
+
+	return nil
+}
+
+// 打印文本
+func printText(printer *os.File, req *PrintRequest) error {
 	// 设置字体大小
 	if req.FontSize > 0 && req.FontSize <= 8 {
 		// ESC ! n 设置打印模式
@@ -159,10 +215,15 @@ func printToLPT(req *PrintRequest) error {
 		printer.Write([]byte("\x1B\x45\x01"))
 	}
 
-	// 写入打印内容
-	// 处理中文编码（转换为GBK）
+	// 转换编码并写入内容
 	content := strings.ReplaceAll(req.Content, "\r\n", "\n")
-	printer.Write([]byte(content))
+	gbkContent, err := utf8ToGBK(content)
+	if err != nil {
+		// 如果转换失败，尝试直接打印
+		printer.Write([]byte(content))
+	} else {
+		printer.Write(gbkContent)
+	}
 	
 	// 添加换行
 	printer.Write([]byte("\n\n"))
@@ -179,10 +240,68 @@ func printToLPT(req *PrintRequest) error {
 		printer.Write([]byte("\x1B\x61\x00"))
 	}
 
-	// 切纸
-	if req.Cut {
-		// GS V m (切纸)
-		printer.Write([]byte("\x1D\x56\x41\x03"))
+	return nil
+}
+
+// 打印条形码
+func printBarcode(printer *os.File, req *PrintRequest) error {
+	// 设置条形码高度
+	// GS h n
+	printer.Write([]byte{0x1D, 0x68, byte(req.BarcodeHeight)})
+
+	// 设置条形码宽度
+	// GS w n (n = 2-6)
+	if req.BarcodeWidth >= 2 && req.BarcodeWidth <= 6 {
+		printer.Write([]byte{0x1D, 0x77, byte(req.BarcodeWidth)})
+	}
+
+	// 设置是否打印条形码下方的文字
+	// GS H n (0=不打印, 1=上方, 2=下方, 3=上下都打印)
+	if req.ShowText {
+		printer.Write([]byte{0x1D, 0x48, 0x02}) // 下方打印
+	} else {
+		printer.Write([]byte{0x1D, 0x48, 0x00}) // 不打印
+	}
+
+	// 设置居中
+	if req.Center {
+		printer.Write([]byte("\x1B\x61\x01"))
+	}
+
+	// 选择条形码类型并打印
+	switch strings.ToUpper(req.BarcodeType) {
+	case "CODE39":
+		// GS k 4 n d1...dn
+		data := []byte(req.BarcodeData)
+		printer.Write([]byte{0x1D, 0x6B, 0x04, byte(len(data))})
+		printer.Write(data)
+	case "EAN13":
+		// GS k 2 d1...d13
+		if len(req.BarcodeData) == 13 {
+			printer.Write([]byte{0x1D, 0x6B, 0x02})
+			printer.Write([]byte(req.BarcodeData))
+		}
+	case "EAN8":
+		// GS k 3 d1...d8
+		if len(req.BarcodeData) == 8 {
+			printer.Write([]byte{0x1D, 0x6B, 0x03})
+			printer.Write([]byte(req.BarcodeData))
+		}
+	case "CODE128":
+		fallthrough
+	default:
+		// GS k 73 n d1...dn (CODE128)
+		data := []byte(req.BarcodeData)
+		printer.Write([]byte{0x1D, 0x6B, 0x49, byte(len(data))})
+		printer.Write(data)
+	}
+
+	// 换行
+	printer.Write([]byte("\n\n"))
+
+	// 取消居中
+	if req.Center {
+		printer.Write([]byte("\x1B\x61\x00"))
 	}
 
 	return nil
@@ -246,7 +365,7 @@ const testHTML = `
 <html>
 <head>
     <meta charset="UTF-8">
-    <title>热敏打印机测试</title>
+    <title>热敏打印机测试 - 支持条形码</title>
     <style>
         body {
             font-family: Arial, sans-serif;
@@ -265,6 +384,31 @@ const testHTML = `
             color: #333;
             text-align: center;
         }
+        .tabs {
+            display: flex;
+            margin-bottom: 20px;
+            border-bottom: 2px solid #ddd;
+        }
+        .tab {
+            padding: 10px 20px;
+            cursor: pointer;
+            background: #f0f0f0;
+            border: 1px solid #ddd;
+            border-bottom: none;
+            margin-right: 5px;
+            border-radius: 5px 5px 0 0;
+        }
+        .tab.active {
+            background: white;
+            border-bottom: 2px solid white;
+            margin-bottom: -2px;
+        }
+        .tab-content {
+            display: none;
+        }
+        .tab-content.active {
+            display: block;
+        }
         textarea {
             width: 100%;
             height: 300px;
@@ -274,6 +418,15 @@ const testHTML = `
             font-family: monospace;
             font-size: 14px;
             box-sizing: border-box;
+        }
+        input[type="text"] {
+            width: 100%;
+            padding: 10px;
+            border: 1px solid #ddd;
+            border-radius: 5px;
+            font-size: 14px;
+            box-sizing: border-box;
+            margin: 10px 0;
         }
         .controls {
             margin: 20px 0;
@@ -286,6 +439,7 @@ const testHTML = `
             display: flex;
             align-items: center;
             gap: 20px;
+            flex-wrap: wrap;
         }
         label {
             display: flex;
@@ -341,27 +495,35 @@ const testHTML = `
             color: #721c24;
             border: 1px solid #f5c6cb;
         }
-        .examples {
-            margin-top: 20px;
+        .barcode-controls {
+            background: #e9ecef;
+            padding: 15px;
+            border-radius: 5px;
+            margin: 10px 0;
         }
-        .example-btn {
-            background: #6c757d;
+        .info {
+            background: #d1ecf1;
+            color: #0c5460;
+            padding: 10px;
+            border-radius: 5px;
+            margin: 10px 0;
             font-size: 14px;
-            padding: 8px 15px;
-            margin: 5px;
-        }
-        .example-btn:hover {
-            background: #5a6268;
         }
     </style>
 </head>
 <body>
     <div class="container">
-        <h1>🖨️ 热敏打印机测试</h1>
+        <h1>🖨️ 热敏打印机测试 - 支持条形码</h1>
         
-        <div>
+        <div class="tabs">
+            <div class="tab active" onclick="switchTab('text')">文本打印</div>
+            <div class="tab" onclick="switchTab('barcode')">条形码打印</div>
+        </div>
+
+        <!-- 文本打印标签页 -->
+        <div id="text-tab" class="tab-content active">
             <h3>打印内容：</h3>
-            <textarea id="content" placeholder="请输入要打印的内容...">
+            <textarea id="text-content" placeholder="请输入要打印的内容...">
 ================================
         跳星马小店
 ================================
@@ -379,72 +541,154 @@ const testHTML = `
 --------------------------------
 感谢您的光临，欢迎下次再来！
 ================================</textarea>
-        </div>
 
-        <div class="controls">
-            <h3>打印选项：</h3>
-            <div class="control-group">
-                <label>
-                    <input type="checkbox" id="cut" checked>
-                    <span>自动切纸</span>
-                </label>
-                <label>
-                    <input type="checkbox" id="bold">
-                    <span>加粗打印</span>
-                </label>
-                <label>
-                    <input type="checkbox" id="center">
-                    <span>居中打印</span>
-                </label>
+            <div class="controls">
+                <h3>打印选项：</h3>
+                <div class="control-group">
+                    <label>
+                        <input type="checkbox" id="text-cut" checked>
+                        <span>自动切纸</span>
+                    </label>
+                    <label>
+                        <input type="checkbox" id="text-bold">
+                        <span>加粗打印</span>
+                    </label>
+                    <label>
+                        <input type="checkbox" id="text-center">
+                        <span>居中打印</span>
+                    </label>
+                </div>
+                <div class="control-group">
+                    <label>
+                        字体大小：
+                        <select id="text-fontSize">
+                            <option value="1">最小</option>
+                            <option value="2">较小</option>
+                            <option value="3" selected>正常</option>
+                            <option value="4">较大</option>
+                            <option value="5">最大</option>
+                        </select>
+                    </label>
+                </div>
             </div>
-            <div class="control-group">
-                <label>
-                    字体大小：
-                    <select id="fontSize">
-                        <option value="1">最小</option>
-                        <option value="2">较小</option>
-                        <option value="3" selected>正常</option>
-                        <option value="4">较大</option>
-                        <option value="5">最大</option>
-                    </select>
-                </label>
+
+            <div class="button-group">
+                <button onclick="printText()">🖨️ 打印文本</button>
             </div>
         </div>
 
-        <div class="examples">
-            <h3>示例模板：</h3>
-            <button class="example-btn" onclick="loadExample('receipt')">收银小票</button>
-            <button class="example-btn" onclick="loadExample('order')">订单凭证</button>
-            <button class="example-btn" onclick="loadExample('test')">测试打印</button>
-        </div>
+        <!-- 条形码打印标签页 -->
+        <div id="barcode-tab" class="tab-content">
+            <h3>条形码设置：</h3>
+            
+            <div class="barcode-controls">
+                <label>条形码类型：</label>
+                <select id="barcode-type" onchange="updateBarcodeInfo()">
+                    <option value="CODE128">CODE128（推荐）</option>
+                    <option value="CODE39">CODE39</option>
+                    <option value="EAN13">EAN-13（13位）</option>
+                    <option value="EAN8">EAN-8（8位）</option>
+                </select>
+                
+                <div class="info" id="barcode-info">
+                    CODE128：支持所有ASCII字符，包括字母、数字和符号
+                </div>
 
-        <div class="button-group">
-            <button onclick="testPrint()">🖨️ 打印测试</button>
+                <label>条形码数据：</label>
+                <input type="text" id="barcode-data" placeholder="输入条形码数据" value="1234567890">
+                
+                <div class="control-group">
+                    <label>
+                        <input type="checkbox" id="barcode-showText" checked>
+                        <span>显示条形码文字</span>
+                    </label>
+                    <label>
+                        <input type="checkbox" id="barcode-center" checked>
+                        <span>居中打印</span>
+                    </label>
+                    <label>
+                        <input type="checkbox" id="barcode-cut" checked>
+                        <span>自动切纸</span>
+                    </label>
+                </div>
+                
+                <div class="control-group">
+                    <label>
+                        条形码宽度：
+                        <select id="barcode-width">
+                            <option value="2">细</option>
+                            <option value="3" selected>正常</option>
+                            <option value="4">粗</option>
+                            <option value="5">很粗</option>
+                            <option value="6">最粗</option>
+                        </select>
+                    </label>
+                    <label>
+                        条形码高度：
+                        <input type="number" id="barcode-height" value="100" min="1" max="255" style="width: 80px;">
+                    </label>
+                </div>
+            </div>
+
+            <div class="button-group">
+                <button onclick="printBarcode()">🖨️ 打印条形码</button>
+            </div>
         </div>
 
         <div id="status" class="status"></div>
     </div>
 
     <script>
-    // 示例模板
-    const examples = {
-        receipt: '================================\\n        跳星马小店\\n================================\\n订单号：2024001234\\n时间：2024-01-15 14:30:25\\n--------------------------------\\n商品名称        数量    单价    小计\\n--------------------------------\\n可口可乐        2      ¥6.00   ¥12.00\\n乐事薯片        1      ¥8.00   ¥8.00\\n德芙巧克力      1      ¥12.00  ¥12.00\\n--------------------------------\\n合计：                        ¥32.00\\n实付：                        ¥32.00\\n--------------------------------\\n感谢您的光临，欢迎下次再来！\\n================================',
-        order: '订单号：ORD-2024-001234\\n================================\\n客户信息\\n姓名：张三\\n电话：138****5678\\n地址：北京市朝阳区xxx街道xxx号\\n\\n订单明细\\n--------------------------------\\n1. 商品A x 2\\n2. 商品B x 1\\n3. 商品C x 3\\n\\n订单金额：¥128.00\\n配送费：¥5.00\\n总计：¥133.00\\n\\n订单状态：已支付\\n================================',
-        test: '打印机测试页\\n================================\\n测试内容：\\n1. 这是第一行测试文字\\n2. 这是第二行测试文字\\n3. 1234567890\\n4. ABCDEFGHIJKLMNOPQRSTUVWXYZ\\n5. abcdefghijklmnopqrstuvwxyz\\n6. !@#$%^&*()_+-=[]{}|;:,.<>?\\n================================\\n测试完成！'
-    };
-
-    // 加载示例
-    function loadExample(type) {
-        document.getElementById('content').value = examples[type];
+    // 切换标签页
+    function switchTab(tab) {
+        // 切换标签
+        document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+        document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
+        
+        if (tab === 'text') {
+            document.querySelector('.tab:nth-child(1)').classList.add('active');
+            document.getElementById('text-tab').classList.add('active');
+        } else {
+            document.querySelector('.tab:nth-child(2)').classList.add('active');
+            document.getElementById('barcode-tab').classList.add('active');
+        }
     }
 
-    // 打印函数
-    async function testPrint() {
-        const content = document.getElementById('content').value;
-        const cut = document.getElementById('cut').checked;
-        const bold = document.getElementById('bold').checked;
-        const center = document.getElementById('center').checked;
-        const fontSize = parseInt(document.getElementById('fontSize').value);
+    // 更新条形码信息
+    function updateBarcodeInfo() {
+        const type = document.getElementById('barcode-type').value;
+        const info = document.getElementById('barcode-info');
+        const dataInput = document.getElementById('barcode-data');
+        
+        switch(type) {
+            case 'CODE128':
+                info.textContent = 'CODE128：支持所有ASCII字符，包括字母、数字和符号';
+                dataInput.placeholder = '输入条形码数据';
+                break;
+            case 'CODE39':
+                info.textContent = 'CODE39：支持大写字母、数字和部分符号（- . $ / + % 空格）';
+                dataInput.placeholder = '输入大写字母和数字';
+                break;
+            case 'EAN13':
+                info.textContent = 'EAN-13：必须是13位数字';
+                dataInput.placeholder = '输入13位数字';
+                dataInput.value = '6901234567890';
+                break;
+            case 'EAN8':
+                info.textContent = 'EAN-8：必须是8位数字';
+                dataInput.placeholder = '输入8位数字';
+                dataInput.value = '12345678';
+                break;
+        }
+    }
+
+    // 打印文本
+    async function printText() {
+        const content = document.getElementById('text-content').value;
+        const cut = document.getElementById('text-cut').checked;
+        const bold = document.getElementById('text-bold').checked;
+        const center = document.getElementById('text-center').checked;
+        const fontSize = parseInt(document.getElementById('text-fontSize').value);
 
         if (!content.trim()) {
             showStatus('请输入打印内容', 'error');
@@ -452,6 +696,7 @@ const testHTML = `
         }
 
         const printData = {
+            type: 'text',
             content: content,
             cut: cut,
             bold: bold,
@@ -459,13 +704,57 @@ const testHTML = `
             fontSize: fontSize
         };
 
+        await sendPrintRequest(printData);
+    }
+
+    // 打印条形码
+    async function printBarcode() {
+        const barcodeType = document.getElementById('barcode-type').value;
+        const barcodeData = document.getElementById('barcode-data').value;
+        const showText = document.getElementById('barcode-showText').checked;
+        const center = document.getElementById('barcode-center').checked;
+        const cut = document.getElementById('barcode-cut').checked;
+        const width = parseInt(document.getElementById('barcode-width').value);
+        const height = parseInt(document.getElementById('barcode-height').value);
+
+        if (!barcodeData.trim()) {
+            showStatus('请输入条形码数据', 'error');
+            return;
+        }
+
+        // 验证条形码数据
+        if (barcodeType === 'EAN13' && barcodeData.length !== 13) {
+            showStatus('EAN-13条形码必须是13位数字', 'error');
+            return;
+        }
+        if (barcodeType === 'EAN8' && barcodeData.length !== 8) {
+            showStatus('EAN-8条形码必须是8位数字', 'error');
+            return;
+        }
+
+        const printData = {
+            type: 'barcode',
+            barcodeType: barcodeType,
+            barcodeData: barcodeData,
+            showText: showText,
+            center: center,
+            cut: cut,
+            barcodeWidth: width,
+            barcodeHeight: height
+        };
+
+        await sendPrintRequest(printData);
+    }
+
+    // 发送打印请求
+    async function sendPrintRequest(data) {
         try {
             const response = await fetch('http://localhost:9100/api/print', {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json'
                 },
-                body: JSON.stringify(printData)
+                body: JSON.stringify(data)
             });
 
             const result = await response.json();
