@@ -1,0 +1,80 @@
+name: Build Executable
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v3
+
+    - name: Setup Go
+      uses: actions/setup-go@v4
+      with:
+        go-version: '1.21'
+
+    - name: Build Windows executables
+      run: |
+        # 创建输出目录
+        mkdir -p dist
+        
+        # 编译 Windows 64位版本
+        echo "Building Windows 64-bit version..."
+        GOOS=windows GOARCH=amd64 go build -ldflags="-s -w" -o dist/打印服务-win64.exe print-server.go
+        
+        # 编译 Windows 32位版本
+        echo "Building Windows 32-bit version..."
+        GOOS=windows GOARCH=386 go build -ldflags="-s -w" -o dist/打印服务-win32.exe print-server.go
+        
+        # 显示编译结果
+        echo "Build completed!"
+        ls -la dist/
+
+    - name: Upload Windows 64-bit artifact
+      uses: actions/upload-artifact@v3
+      with:
+        name: 打印服务-win64
+        path: dist/打印服务-win64.exe
+
+    - name: Upload Windows 32-bit artifact
+      uses: actions/upload-artifact@v3
+      with:
+        name: 打印服务-win32
+        path: dist/打印服务-win32.exe
+
+    - name: Create Release
+      if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')
+      uses: softprops/action-gh-release@v1
+      with:
+        name: 热敏打印服务 v1.0.${{ github.run_number }}
+        tag_name: v1.0.${{ github.run_number }}
+        body: |
+          ## 热敏打印服务
+          
+          支持通过 HTTP API 控制 LPT 端口热敏打印机。
+          
+          ### 下载说明
+          - **打印服务-win64.exe**: Windows 64位系统使用
+          - **打印服务-win32.exe**: Windows 32位系统使用
+          
+          ### 使用方法
+          1. 下载对应版本的 exe 文件
+          2. 双击运行
+          3. 服务会在 http://localhost:9100 启动
+          4. 自动打开测试页面
+          
+          ### API 接口
+          - POST http://localhost:9100/api/print
+          - GET http://localhost:9100/api/status
+        files: |
+          dist/打印服务-win64.exe
+          dist/打印服务-win32.exe
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
